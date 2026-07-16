@@ -1,0 +1,20 @@
+config_version: 1
+
+models:
+  - name: gpt-4o
+    display_name: GPT-4o
+    use: langchain_openai:ChatOpenAI
+    model: gpt-4o
+    api_key: $OPENAI_API_KEY
+
+memory:
+  enabled: false
+  mode: middleware
+
+sandbox:
+  provider: local
+  allow_host_bash: true
+
+subagents:
+  enabled: true
+  max_concurrent: 3

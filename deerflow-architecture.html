@@ -1,0 +1,511 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DeerFlow 架构全解析</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<style>
+:root {
+  --bg: #f6f3ec; --card-bg: #ffffff; --card-border: #ded7c8;
+  --text: #171b22; --text-secondary: #707682; --title: #1f5cff;
+  --blue: #1f5cff; --red: #dc3545; --green: #0f9960;
+  --orange: #e87722; --purple: #7c5cbf; --cyan: #0891b2;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: var(--bg); color: var(--text);
+  font-family: "Aptos", "Segoe UI Variable Display", "Microsoft YaHei UI", sans-serif;
+  min-height: 100vh; padding: 32px 24px 60px;
+}
+.page { max-width: 1200px; margin: 0 auto; }
+
+.page-header { text-align: center; margin-bottom: 40px; }
+.page-header h1 {
+  font-size: 30px; font-weight: 800; letter-spacing: 1px;
+  background: linear-gradient(90deg, var(--blue), var(--purple), var(--cyan));
+  -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+.page-header .subtitle { color: var(--text-secondary); font-size: 13px; margin-top: 8px; }
+
+.section {
+  background: var(--card-bg); border: 1px solid var(--card-border);
+  border-radius: 5px; padding: 28px 30px; margin-bottom: 28px;
+  position: relative; overflow: hidden;
+  box-shadow: 0 1px 3px rgba(31,92,255,0.04);
+  transition: border-color 0.2s, box-shadow 0.2s;
+  animation: fadeIn 0.5s ease-out both;
+}
+.section:hover {
+  border-color: #c8d7f2;
+  box-shadow: 0 2px 8px rgba(31,92,255,0.08);
+}
+.section::before {
+  content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px;
+  background: linear-gradient(90deg, transparent, var(--accent, var(--blue)), transparent);
+}
+.section h2 {
+  font-size: 18px; font-weight: 700; color: var(--title);
+  margin-bottom: 6px; display: flex; align-items: center; gap: 8px;
+}
+.section h2 .num {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px; border-radius: 5px;
+  background: rgba(31,92,255,0.08); color: var(--blue);
+  font-size: 14px; font-weight: 800;
+}
+.desc {
+  color: var(--text-secondary); font-size: 13px; margin-bottom: 20px;
+  line-height: 1.6;
+}
+.mermaid {
+  display: flex; justify-content: center;
+  padding: 16px 0; overflow-x: auto;
+}
+.legend {
+  display: flex; flex-wrap: wrap; gap: 16px;
+  margin-top: 16px; padding-top: 14px;
+  border-top: 1px solid var(--card-border);
+}
+.legend-item {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 12px; color: var(--text-secondary);
+}
+.legend-color {
+  width: 14px; height: 14px; border-radius: 3px;
+  border: 1px solid rgba(0,0,0,0.08);
+}
+.compare-grid {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 20px;
+}
+.compare-card {
+  background: #fbfaf6; border: 1px solid var(--card-border);
+  border-radius: 5px; padding: 16px 20px;
+}
+.compare-card h3 {
+  font-size: 14px; font-weight: 700; margin-bottom: 8px;
+  display: flex; align-items: center; gap: 6px;
+}
+.compare-card.bad h3 { color: var(--red); }
+.compare-card.good h3 { color: var(--green); }
+.compare-card ul { list-style: none; padding: 0; }
+.compare-card li {
+  padding: 4px 0; font-size: 13px; color: var(--text-secondary);
+  display: flex; align-items: flex-start; gap: 6px;
+}
+.compare-card li::before { flex-shrink: 0; }
+.compare-card.bad li::before { content: '✗'; color: var(--red); font-weight: 700; }
+.compare-card.good li::before { content: '✓'; color: var(--green); font-weight: 700; }
+.footer {
+  text-align: center; color: #adb1ba;
+  font-size: 11px; margin-top: 40px; letter-spacing: 1px;
+}
+@keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+@media (max-width: 800px) { .compare-grid { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="page-header">
+    <h1>🦌 DeerFlow 架构全解析</h1>
+    <div class="subtitle">Deep Exploration and Efficient Research Flow — AI Super Agent Harness</div>
+    <div class="subtitle" style="margin-top:4px;color:#e87722;font-weight:600;">源码位置：C:\Users\Administrator\deer-flow\</div>
+  </div>
+
+  <!-- 1. 整体服务拓扑 -->
+  <div class="section" style="--accent: var(--blue);">
+    <h2><span class="num">1</span>整体服务拓扑</h2>
+    <div class="desc">DeerFlow 由 4 个服务协作。源码位置：<code>C:\Users\Administrator\deer-flow\</code></div>
+    <div class="mermaid">
+graph TB
+  classDef blueNode fill:#eef2ff,stroke:#1f5cff,stroke-width:2px,color:#171b22
+  classDef orangeNode fill:#fffbeb,stroke:#e87722,stroke-width:2px,color:#171b22
+  classDef purpleNode fill:#f5f3ff,stroke:#7c5cbf,stroke-width:2px,color:#171b22
+  classDef greenNode fill:#f0fdf4,stroke:#0f9960,stroke-width:2px,color:#171b22
+
+  Browser["🖥️ 浏览器"] --> Nginx["🚪 Nginx :2026"]
+
+  subgraph Nginx内部["Nginx 反向代理"]
+    direction TB
+    Nginx -->|"/ → 前端"| FE["📱 Next.js :3000"]
+    Nginx -->|"/api/* → 后端"| GW["⚡ Gateway :8001"]
+  end
+
+  subgraph Gateway内部["Gateway 内部"]
+    direction TB
+    REST["📋 REST API"] --> Config["⚙️ 配置系统"]
+    Runtime["🤖 Agent 运行时"] --> LLM["🧠 LLM 调用"]
+    Runtime --> Tools["🔧 工具执行"]
+    Runtime --> SubAgents["👥 子代理"]
+  end
+
+  GW --> REST
+  GW --> Runtime
+  Tools --> Sandbox["📦 Sandbox"]
+
+  class Browser blueNode
+  class Nginx orangeNode
+  class FE blueNode
+  class GW purpleNode
+  class Sandbox greenNode
+    </div>
+    <div class="legend">
+      <div class="legend-item"><div class="legend-color" style="background:#eef2ff;border-color:#1f5cff"></div>用户层</div>
+      <div class="legend-item"><div class="legend-color" style="background:#fffbeb;border-color:#e87722"></div>网关层</div>
+      <div class="legend-item"><div class="legend-color" style="background:#f5f3ff;border-color:#7c5cbf"></div>核心服务层</div>
+      <div class="legend-item"><div class="legend-color" style="background:#f0fdf4;border-color:#0f9960"></div>执行层</div>
+    </div>
+  </div>
+
+  <!-- 2. Agent 执行循环（核心） -->
+  <div class="section" style="--accent: var(--purple);">
+    <h2><span class="num">2</span>Agent 执行循环（最核心）</h2>
+    <div class="desc">用户发一条消息，Agent 循环执行：调 LLM → 判断是否用工具 → 执行工具 → 结果返回 LLM → 直到 LLM 说"完成"。这是整个系统的灵魂。</div>
+    <div class="mermaid">
+sequenceDiagram
+  actor User as 👤 用户
+  participant FE as 📱 前端
+  participant GW as ⚡ Gateway
+  participant Agent as 🤖 Agent
+  participant LLM as 🧠 LLM
+  participant Tool as 🔧 工具
+  participant SB as 📦 Sandbox
+
+  rect rgb(238,242,255)
+    Note over User,SB: 阶段一：用户发起请求
+    User->>FE: "帮我写个 Python 脚本分析 CSV"
+    FE->>GW: POST /api/threads/abc/runs/stream
+    GW->>Agent: 启动 LangGraph 图
+  end
+
+  rect rgb(245,243,255)
+    Note over Agent,LLM: 阶段二：Agent 循环（可能多次）
+    Agent->>Agent: 中间件链 beforeModel（注入日期、记忆）
+    Agent->>LLM: 发送消息历史 + 系统提示
+    LLM-->>Agent: tool_call: read_file(path="data.csv")
+    Agent->>Agent: 中间件链 wrapToolCall（错误处理、审计）
+    Agent->>Tool: 执行 read_file
+    Tool->>SB: 读取文件
+    SB-->>Tool: CSV 内容
+    Tool-->>Agent: 文件内容
+    Agent->>LLM: 发送工具结果
+    LLM-->>Agent: tool_call: write_file(path="analyze.py")
+    Agent->>Tool: 执行 write_file
+    Tool->>SB: 写入文件
+    SB-->>Tool: 成功
+    Tool-->>Agent: 文件已创建
+    Agent->>LLM: 发送工具结果
+    LLM-->>Agent: "脚本写好了！要运行吗？"
+  end
+
+  rect rgb(240,253,244)
+    Note over Agent,FE: 阶段三：流式返回
+    Agent->>Agent: 中间件链 afterModel（生成标题、记录 token）
+    Agent-->>GW: 最终响应
+    GW-->>FE: SSE 流式事件
+    FE-->>User: 显示回复
+  end
+    </div>
+  </div>
+
+  <!-- 3. 中间件链 -->
+  <div class="section" style="--accent: var(--orange);">
+    <h2><span class="num">3</span>中间件链（32 个拦截器）</h2>
+    <div class="desc">中间件在 Agent 循环的关键点插入逻辑。像洋葱一样层层包裹：beforeModel 正序执行，afterModel 反序执行，wrapToolCall 包裹工具调用。</div>
+    <div class="mermaid">
+graph LR
+  classDef core fill:#eef2ff,stroke:#1f5cff,stroke-width:2px,color:#171b22
+  classDef guard fill:#fef2f2,stroke:#dc3545,stroke-width:2px,color:#171b22
+  classDef enhance fill:#f0fdf4,stroke:#0f9960,stroke-width:2px,color:#171b22
+  classDef ctx fill:#fffbeb,stroke:#e87722,stroke-width:2px,color:#171b22
+
+  subgraph 输入阶段["📥 输入处理"]
+    direction TB
+    M1["1. InputSanitization"] --> M2["2. ToolOutputBudget"]
+    M2 --> M3["3. ToolResultSanitization"]
+  end
+
+  subgraph 环境准备["🔧 环境准备"]
+    direction TB
+    M4["4. ThreadData"] --> M5["5. Uploads"]
+    M5 --> M6["6. Sandbox"]
+  end
+
+  subgraph 安全防护["🛡️ 安全防护"]
+    direction TB
+    M8["8. LLMErrorHandling"] --> M9["9. Guardrail"]
+    M9 --> M11["11. ReadBeforeWrite"]
+    M11 --> M12["12. ToolProgress"]
+    M12 --> M13["13. ToolErrorHandling"]
+  end
+
+  subgraph 上下文注入["📋 上下文注入"]
+    direction TB
+    M14["14. DynamicContext"] --> M15["15. SkillActivation"]
+    M15 --> M16["16. DurableContext"]
+    M16 --> M17["17. Summarization"]
+  end
+
+  subgraph 后处理["📤 后处理"]
+    direction TB
+    M20["20. Title"] --> M21["21. Memory"]
+    M21 --> M27["27. LoopDetection"]
+    M27 --> M32["32. Clarification"]
+  end
+
+  输入阶段 --> 环境准备
+  环境准备 -->|调用 LLM| 安全防护
+  安全防护 --> 上下文注入
+  上下文注入 --> 后处理
+
+  class M1,M2,M3 core
+  class M4,M5,M6 core
+  class M8,M9,M11,M12,M13 guard
+  class M14,M15,M16,M17 ctx
+  class M20,M21,M27,M32 enhance
+    </div>
+    <div class="legend">
+      <div class="legend-item"><div class="legend-color" style="background:#eef2ff;border-color:#1f5cff"></div>核心处理</div>
+      <div class="legend-item"><div class="legend-color" style="background:#fef2f2;border-color:#dc3545"></div>安全防护</div>
+      <div class="legend-item"><div class="legend-color" style="background:#fffbeb;border-color:#e87722"></div>上下文注入</div>
+      <div class="legend-item"><div class="legend-color" style="background:#f0fdf4;border-color:#0f9960"></div>增强功能</div>
+    </div>
+  </div>
+
+  <!-- 4. 状态流动 -->
+  <div class="section" style="--accent: var(--green);">
+    <h2><span class="num">4</span>ThreadState 状态流动</h2>
+    <div class="desc">Agent 的所有数据都存在 ThreadState 里。每个字段有 reducer（合并函数），处理多个节点同时修改同一个字段的情况。</div>
+    <div class="mermaid">
+graph TD
+  classDef state fill:#eef2ff,stroke:#1f5cff,stroke-width:2px,color:#171b22
+  classDef reducer fill:#fffbeb,stroke:#e87722,stroke-width:2px,color:#171b22
+  classDef data fill:#f0fdf4,stroke:#0f9960,stroke-width:2px,color:#171b22
+
+  TS["📦 ThreadState"] --> MSG["messages<br/>对话历史"]
+  TS --> SB["sandbox<br/>沙箱状态"]
+  TS --> TD["thread_data<br/>工作目录"]
+  TS --> TTL["title<br/>对话标题"]
+  TS --> ART["artifacts<br/>产出文件"]
+  TS --> GOAL["goal<br/>当前目标"]
+  TS --> DEL["delegations<br/>子代理账本"]
+  TS --> SK["skill_context<br/>激活技能"]
+  TS --> SUM["summary_text<br/>压缩摘要"]
+
+  MSG -.->|直接替换| R1["reducer: 后写覆盖"]
+  SB -.->|幂等写入| R2["reducer: 相同OK, 不同报错"]
+  ART -.->|去重合并| R3["reducer: [a,b]+[b,c]=[a,b,c]"]
+  DEL -.->|按ID合并| R4["reducer: 终端状态不降级"]
+  SK -.->|按path去重| R5["reducer: 保留最近读取"]
+
+  class TS state
+  class MSG,SB,TD,TTL,ART,GOAL,DEL,SK,SUM data
+  class R1,R2,R3,R4,R5 reducer
+    </div>
+  </div>
+
+  <!-- 5. 虚拟路径系统 -->
+  <div class="section" style="--accent: var(--cyan);">
+    <h2><span class="num">5</span>虚拟路径系统（安全隔离）</h2>
+    <div class="desc">Agent 看到的路径和实际物理路径不同。每个用户、每个线程有独立目录，互不干扰。</div>
+    <div class="mermaid">
+graph LR
+  classDef virtual fill:#eef2ff,stroke:#1f5cff,stroke-width:2px,color:#171b22
+  classDef arrow fill:#fffbeb,stroke:#e87722,stroke-width:1px,color:#171b22
+  classDef physical fill:#f0fdf4,stroke:#0f9960,stroke-width:2px,color:#171b22
+
+  subgraph Agent视角["👁️ Agent 看到的路径"]
+    direction TB
+    V1["/mnt/user-data/workspace/"]
+    V2["/mnt/user-data/uploads/"]
+    V3["/mnt/user-data/outputs/"]
+    V4["/mnt/skills/"]
+  end
+
+  subgraph 实际路径["💾 实际物理路径"]
+    direction TB
+    P1[".deer-flow/users/{用户ID}/threads/{线程ID}/user-data/workspace/"]
+    P2[".deer-flow/users/{用户ID}/threads/{线程ID}/user-data/uploads/"]
+    P3[".deer-flow/users/{用户ID}/threads/{线程ID}/user-data/outputs/"]
+    P4["deer-flow/skills/"]
+  end
+
+  V1 ==>|"路径翻译"| P1
+  V2 ==>|"路径翻译"| P2
+  V3 ==>|"路径翻译"| P3
+  V4 ==>|"路径翻译"| P4
+
+  class V1,V2,V3,V4 virtual
+  class P1,P2,P3,P4 physical
+    </div>
+  </div>
+
+  <!-- 6. 子代理系统 -->
+  <div class="section" style="--accent: var(--purple);">
+    <h2><span class="num">6</span>子代理委托系统</h2>
+    <div class="desc">复杂任务拆成小任务并行执行。主代理（Lead Agent）派活，子代理（Subagent）独立执行，完成后返回结果。</div>
+    <div class="mermaid">
+sequenceDiagram
+  actor User as 👤 用户
+  participant Lead as 🤖 Lead Agent
+  participant Exec as ⚙️ SubagentExecutor
+  participant Sub1 as 👷 子代理1
+  participant Sub2 as 👷 子代理2
+  participant Sub3 as 👷 子代理3
+
+  User->>Lead: "分析这 3 个 CSV 文件"
+  Lead->>Lead: 决定派 3 个子代理
+
+  rect rgb(238,242,255)
+    Note over Lead,Sub3: 并行派发（最多 4 个并发）
+    Lead->>Exec: task("分析 sales.csv")
+    Lead->>Exec: task("分析 users.csv")
+    Lead->>Exec: task("分析 products.csv")
+    Exec->>Sub1: 创建子代理（后台线程）
+    Exec->>Sub2: 创建子代理（后台线程）
+    Exec->>Sub3: 创建子代理（后台线程）
+  end
+
+  rect rgb(240,253,244)
+    Note over Sub1,Sub3: 独立执行（各有自己的 LLM + 工具）
+    Sub1->>Sub1: read_file → bash python → 分析完成
+    Sub2->>Sub2: read_file → bash python → 分析完成
+    Sub3->>Sub3: read_file → bash python → 分析完成
+  end
+
+  rect rgb(251,250,246)
+    Note over Lead,User: 结果汇总
+    Sub1-->>Lead: sales 分析结果
+    Sub2-->>Lead: users 分析结果
+    Sub3-->>Lead: products 分析结果
+    Lead->>Lead: 汇总结果，写报告
+    Lead-->>User: "3 个文件分析完成，报告如下..."
+  end
+    </div>
+  </div>
+
+  <!-- 7. 记忆系统 -->
+  <div class="section" style="--accent: var(--green);">
+    <h2><span class="num">7</span>记忆系统</h2>
+    <div class="desc">从对话中提炼关键事实，跨对话保留。下次对话时注入系统提示，让 Agent "记住"用户偏好。</div>
+    <div class="mermaid">
+graph TD
+  classDef input fill:#eef2ff,stroke:#1f5cff,stroke-width:2px,color:#171b22
+  classDef process fill:#fffbeb,stroke:#e87722,stroke-width:2px,color:#171b22
+  classDef store fill:#f0fdf4,stroke:#0f9960,stroke-width:2px,color:#171b22
+  classDef output fill:#f5f3ff,stroke:#7c5cbf,stroke-width:2px,color:#171b22
+
+  Conv["💬 对话: '我喜欢用 TypeScript'"]
+  Conv --> MW["🔄 MemoryMiddleware"]
+  MW -->|等待 30 秒| Queue["📥 去抖队列"]
+  Queue -->|调用 LLM| Extract["🧠 事实提取"]
+  Extract -->|"category: preference<br/>confidence: 0.9"| Facts["📋 结构化事实"]
+  Facts --> Store["💾 memory.json"]
+  Store -->|下次对话| Inject["💉 注入系统提示"]
+  Inject --> LLM["🤖 LLM 看到记忆"]
+
+  class Conv input
+  class MW,Queue,Extract process
+  class Facts,Store store
+  class Inject,LLM output
+    </div>
+  </div>
+
+  <!-- 8. Harness/App 分层 -->
+  <div class="section" style="--accent: var(--blue);">
+    <h2><span class="num">8</span>Harness / App 分层原则</h2>
+    <div class="desc">核心框架（Harness）和应用层（App）严格分离。Harness 可独立发布为 npm 包，App 依赖 Harness，Harness 永远不依赖 App。</div>
+    <div class="mermaid">
+graph TB
+  classDef harness fill:#eef2ff,stroke:#1f5cff,stroke-width:2px,color:#171b22
+  classDef app fill:#fffbeb,stroke:#e87722,stroke-width:2px,color:#171b22
+  classDef external fill:#f0fdf4,stroke:#0f9960,stroke-width:2px,color:#171b22
+
+  subgraph Harness["@deer-flow/harness — 可发布框架"]
+    direction TB
+    H1["⚙️ Config 配置系统"]
+    H2["🧠 Models 模型工厂"]
+    H3["🤖 Agents Agent系统"]
+    H4["📦 Sandbox 沙箱系统"]
+    H5["🔧 Tools 工具系统"]
+    H6["👥 Subagents 子代理"]
+    H7["💾 Memory 记忆系统"]
+  end
+
+  subgraph App["@deer-flow/app — 应用层"]
+    direction TB
+    A1["🚪 Gateway API"]
+    A2["📡 IM Channels"]
+  end
+
+  subgraph Frontend["前端"]
+    F1["📱 Next.js"]
+  end
+
+  A1 -->|"import"| Harness
+  A2 -->|"import"| Harness
+  F1 -->|"HTTP/SSE"| A1
+
+  style Harness fill:#eef2ff,stroke:#1f5cff,stroke-width:2px
+  style App fill:#fffbeb,stroke:#e87722,stroke-width:2px
+  style Frontend fill:#f0fdf4,stroke:#0f9960,stroke-width:2px
+    </div>
+  </div>
+
+  <div class="footer">G-web 架构可视化 · 2026-07-15</div>
+</div>
+
+<script>
+mermaid.initialize({
+  startOnLoad: true,
+  theme: 'default',
+  securityLevel: 'loose',
+  themeVariables: {
+    primaryColor: '#eef2ff',
+    primaryTextColor: '#171b22',
+    primaryBorderColor: '#1f5cff',
+    lineColor: '#1f5cff',
+    secondaryColor: '#f0fdf4',
+    tertiaryColor: '#fbfaf6',
+    fontFamily: '"Aptos", "Segoe UI Variable Display", "Microsoft YaHei UI", sans-serif',
+    fontSize: '13px',
+    actorBkg: '#eef2ff',
+    actorBorder: '#1f5cff',
+    actorTextColor: '#171b22',
+    signalColor: '#171b22',
+    signalTextColor: '#171b22',
+    noteBkgColor: '#fffbeb',
+    noteTextColor: '#171b22',
+    noteBorderColor: '#e87722',
+    loopTextColor: '#1f5cff',
+    activationBkgColor: '#eef2ff',
+    activationBorderColor: '#1f5cff',
+    sequenceNumberColor: '#ffffff',
+    sectionBkgColor: '#f6f3ec',
+    altSectionBkgColor: '#f0fdf4',
+    gridColor: '#e5e1d8',
+    doneColor: '#0f9960',
+    critBkgColor: '#fef2f2',
+    critBorderColor: '#dc3545',
+    fillType0: '#eef2ff',
+    fillType1: '#f0fdf4',
+    fillType2: '#fef3c7',
+    fillType3: '#fce7f3',
+    fillType4: '#ede9fe',
+    fillType5: '#ecfdf5',
+    fillType6: '#e0f2fe',
+    fillType7: '#fdf4ff',
+    classText: '#171b22',
+    edgeLabelBackground: '#ffffff',
+    clusterBkg: '#f6f3ec',
+    clusterBorder: '#c8d7f2',
+    titleColor: '#1f5cff',
+    edgeLabelColor: '#171b22'
+  },
+  flowchart: { curve: 'basis', padding: 16, htmlLabels: true },
+  sequence: { mirrorActors: false, bottomMarginAdj: 2, boxMargin: 8, useMaxWidth: true }
+});
+</script>
+</body>
+</html>
