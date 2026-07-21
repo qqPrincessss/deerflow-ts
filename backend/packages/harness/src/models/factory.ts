@@ -120,6 +120,11 @@ export async function createChatModel(
     // 标准化 api_base → base_url
     normalizeOpenaiBaseUrl(modelSettings);
 
+    //注入默认超时
+    _applyStreamChunkTimeOutDefault(modelSettings);
+    if (!("stream_usage" in modelSettings)) {
+        modelSettings.stream_usage = true;
+    }
     // 动态加载模型类
     const { resolveClass } = await import("../reflection/resolvers.js");
     const modelClass = await resolveClass(modelConfig.use);
@@ -127,5 +132,42 @@ export async function createChatModel(
     // 创建模型实例
     const model = new (modelClass as new (settings: Record<string, unknown>) => BaseChatModel)(modelSettings);
 
+
+    // 附加追踪回调（LangSmith/Langfuse）
+    if (attachTracing) {
+        // TODO: 实现 build_tracing_callbacks()
+        // const callbacks = buildTracingCallbacks();
+        // if (callbacks.length > 0) {
+        //     model.callbacks = [...(model.callbacks || []), ...callbacks];
+        // }
+    }
+
+
     return model;
 }
+
+//警告未知配置
+export function _warnUnkonwnModelSettings(modelSettings: Record<string, unknown>, modelName: string): void {
+    const knownKeys = new Set([
+        "model", "api_key", "base_url", "max_tokens", "temperature",
+        "model_kwargs", "extra_body", "default_headers", "default_query",
+        "stream_usage", "stream_chunk_timeout", "reasoning_effort",
+        "use_responses_api", "output_version",
+    ]);
+
+    // 找出未知的 key
+    const unknown = Object.keys(modelSettings).filter(k => !knownKeys.has(k));
+    if (unknown.length > 0) {
+        console.warn(`Model '${modelName}': unknown config keys: ${unknown.join(", ")}.
+  Check for typos.`);
+    }
+}
+
+const DEFAULT_STREAM_CHUNK_TIMEOUT_SECONDS = 240;
+export function _applyStreamChunkTimeOutDefault(modelSettings: Record<string, unknown>): void {
+    // 如果用户已经配置了，保留
+    if ("stream_chunk_timeout" in modelSettings) return;
+    // 注入默认值
+    modelSettings.stream_chunk_timeout = DEFAULT_STREAM_CHUNK_TIMEOUT_SECONDS;
+}
+
