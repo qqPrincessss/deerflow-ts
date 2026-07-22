@@ -48,7 +48,7 @@ function toolCallId(toolCall: Record<string, unknown>): string | null {
 /**
  * 从 tool_call 的 args 中提取文件路径。
  */
-function toolCallPath(toolCall: Record<string, unknown>): string | null {
+export function toolCallPath(toolCall: Record<string, unknown>): string | null {
     const args = toolCall.args;
     if (!args || typeof args !== "object") return null;
     const obj = args as Record<string, unknown>;

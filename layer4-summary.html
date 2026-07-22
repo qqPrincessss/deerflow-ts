@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 4 层总结 — 模型和记忆</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<style>
+:root { --bg: #f6f3ec; --card-bg: #ffffff; --card-border: #ded7c8; --text: #171b22; --text-secondary: #707682; --title: #1f5cff; --blue: #1f5cff; --red: #dc3545; --green: #0f9960; --orange: #e87722; --purple: #7c5cbf; --cyan: #0891b2; }
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: var(--bg); color: var(--text); font-family: "Aptos", "Segoe UI Variable Display", "Microsoft YaHei UI", sans-serif; padding: 32px 24px 60px; }
+.page { max-width: 1100px; margin: 0 auto; }
+.page-header { text-align: center; margin-bottom: 40px; }
+.page-header h1 { font-size: 28px; font-weight: 800; background: linear-gradient(90deg,var(--blue),var(--purple),var(--cyan)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
+.section { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 5px; padding: 24px; margin-bottom: 24px; box-shadow: 0 1px 3px rgba(31,92,255,0.04); position: relative; overflow: hidden; }
+.section::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px; background: linear-gradient(90deg, transparent, var(--accent,var(--blue)), transparent); }
+.section h2 { font-size: 18px; font-weight: 700; color: var(--title); margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
+.section h2 .num { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; border-radius: 5px; background: rgba(31,92,255,0.08); color: var(--blue); font-size: 13px; font-weight: 800; }
+.desc { color: var(--text-secondary); font-size: 13px; margin-bottom: 16px; line-height: 1.6; }
+.mermaid { display: flex; justify-content: center; padding: 12px 0; overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; margin: 12px 0; }
+th, td { padding: 8px 12px; border-bottom: 1px solid var(--card-border); font-size: 13px; }
+th { text-align: left; color: var(--text-secondary); font-weight: 600; }
+.label { display: inline-block; padding: 2px 10px; border-radius: 3px; font-size: 11px; font-weight: 600; }
+.label-done { background: #d4edda; color: #155724; }
+.label-pending { background: #fff3cd; color: #856404; }
+.footer { text-align: center; color: #adb1ba; font-size: 11px; margin-top: 40px; }
+.code-box { background: #f8f7f4; border: 1px solid #e5e1d8; border-radius: 5px; padding: 14px; font-family: 'Consolas','Courier New',monospace; font-size: 12px; line-height: 1.6; overflow-x: auto; white-space: pre; }
+.compact-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.card { background: #fbfaf6; border: 1px solid var(--card-border); border-radius: 5px; padding: 14px; }
+.card h3 { font-size: 14px; font-weight: 700; margin-bottom: 6px; }
+.card p { font-size: 12px; color: var(--text-secondary); line-height: 1.6; }
+@media (max-width:700px) { .compact-grid { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="page-header">
+    <h1>📦 第 4 层总结 — 模型和记忆</h1>
+  </div>
+
+  <!-- 1. 模块一览 -->
+  <div class="section" style="--accent:var(--blue);">
+    <h2><span class="num">1</span>8 个模块一览</h2>
+    <table>
+      <tr><th>序号</th><th>模块</th><th>行数</th><th>作用</th></tr>
+      <tr><td>4-1</td><td>models/factory.ts</td><td>148</td><td>根据配置创建 LLM 实例（支持 thinking 模式）</td></tr>
+      <tr><td>4-2</td><td>models/vllm_provider.ts</td><td>136</td><td>vLLM 适配器（保留 reasoning 字段）</td></tr>
+      <tr><td>4-3</td><td>models/claude_provider.ts</td><td>120</td><td>Claude OAuth 认证 + thinking 预算</td></tr>
+      <tr><td>4-4</td><td>agents/memory/storage.ts</td><td>219</td><td>memory.json 读写 + 缓存 + 原子写入 + 线程锁</td></tr>
+      <tr><td>4-5</td><td>agents/memory/prompt.ts</td><td>369</td><td>记忆提示模板 + token 计数 + 格式化注入</td></tr>
+      <tr><td>4-6</td><td>agents/memory/updater.ts</td><td>842</td><td>调 LLM 提取事实 + 过期审查 + 事实合并</td></tr>
+      <tr><td>4-7</td><td>agents/memory/queue.ts</td><td>241</td><td>30 秒去抖队列</td></tr>
+      <tr><td>4-8</td><td>agents/memory/message_processing.ts</td><td>177</td><td>消息过滤 + 纠正/强化信号检测</td></tr>
+      <tr><th></th><th>总计</th><th>2252 行</th><th></th></tr>
+    </table>
+  </div>
+
+  <!-- 2. 记忆系统工作流程 -->
+  <div class="section" style="--accent:var(--purple);">
+    <h2><span class="num">2</span>记忆系统工作流程</h2>
+    <div class="desc">从对话 → 提取事实 → 保存 → 下次注入，一条完整链路</div>
+    <div class="mermaid">
+sequenceDiagram
+  participant MW as 🔄 MemoryMiddleware
+  participant Queue as ⏳ queue.ts
+  participant Msg as 📋 message_processing.ts
+  participant Updater as 📝 updater.ts
+  participant LLM as 🧠 LLM
+  participant Storage as 💾 storage.ts
+  participant File as 📄 memory.json
+
+  MW->>Queue: 对话完成，加入队列
+  Queue->>Msg: 过滤消息（去隐藏、去上传）
+  Queue->>Queue: 等 30 秒（debounce）
+  Queue->>Updater: 触发更新
+  Updater->>Storage: load() 读当前记忆
+  Storage->>File: 读 memory.json
+  File-->>Storage: 记忆数据
+  Storage-->>Updater: 当前记忆
+  Updater->>Updater: 准备提示（过期审查+事实合并）
+  Updater->>LLM: 发送 MEMORY_UPDATE_PROMPT
+  LLM-->>Updater: {"newFacts": [{"content":"偏好 TS"}]}
+  Updater->>Updater: 解析 JSON + 合并到记忆
+  Updater->>Storage: save(更新后记忆)
+  Storage->>File: 写 memory.json
+    </div>
+  </div>
+
+  <!-- 3. 四个记忆模块分工 -->
+  <div class="section" style="--accent:var(--green);">
+    <h2><span class="num">3</span>记忆系统 5 个文件分工</h2>
+    <div class="compact-grid">
+      <div class="card"><h3>💾 storage.ts</h3><p>读写 memory.json<br>缓存 + 原子写入 + 线程锁<br><strong>只做：</strong>文件 IO<br><strong>不做：</strong>调 LLM</p></div>
+      <div class="card"><h3>📋 prompt.ts</h3><p>提示模板 + 记忆注入格式化<br>MEMORY_UPDATE_PROMPT + _countTokens<br><strong>只做：</strong>文本处理<br><strong>不做：</strong>调 LLM</p></div>
+      <div class="card"><h3>📝 updater.ts</h3><p>调 LLM 提取事实<br>解析响应 + 合并 + 过期审查 + 事实合并<br><strong>核心入口</strong></p></div>
+      <div class="card"><h3>⏳ queue.ts</h3><p>30 秒去抖队列<br>批量处理 + 防重复<br><strong>只做：</strong>排队</p></div>
+      <div class="card"><h3>🔍 message_processing.ts</h3><p>过滤消息（去隐藏/去上传）<br>检测用户纠正/强化信号<br><strong>只做：</strong>信号检测</p></div>
+    </div>
+  </div>
+
+  <!-- 4. storage.ts 结构 -->
+  <div class="section" style="--accent:var(--cyan);">
+    <h2><span class="num">4</span>storage.ts — 文件结构</h2>
+    <div class="code-box">memory.json
+├── "version": "1.0"
+├── "lastUpdated": "2026-07-22T..."
+
+├── "user":                       ← 每次都注入
+│   ├── "workContext":     { summary, updatedAt }
+│   ├── "personalContext": { summary, updatedAt }
+│   └── "topOfMind":       { summary, updatedAt }
+
+├── "history":                    ← 偶尔注入
+│   ├── "recentMonths":       { summary, updatedAt }
+│   ├── "earlierContext":     { summary, updatedAt }
+│   └── "longTermBackground":{ summary, updatedAt }
+
+└── "facts": [                    ← 按置信度排序注入
+    { id, content, category, confidence, createdAt }
+]</div>
+  </div>
+
+  <!-- 5. updater.ts 26 个函数 -->
+  <div class="section" style="--accent:var(--orange);">
+    <h2><span class="num">5</span>updater.ts 函数清单（27/27 对齐）</h2>
+    <table>
+      <tr><th>分类</th><th>函数</th><th>说明</th></tr>
+      <tr><td>存储访问</td><td>getMemoryData / saveMemoryToFile / reloadMemoryData / importMemoryData / clearMemoryData</td><td>5 个 async CRUD</td></tr>
+      <tr><td>事实 CRUD</td><td>createMemoryFact / createMemoryFactWithCreatedFact / deleteMemoryFact / searchMemoryFacts / updateMemoryFact</td><td>5 个 async CRUD</td></tr>
+      <tr><td>工具</td><td>_validateConfidence / _coerceSourceConfidence / _trimFactsToMax / _extractText / _factContentKey / _parseFactDatetime</td><td>6 个工具函数</td></tr>
+      <tr><td>LLM 解析</td><td>_normalizeMemoryUpdateFact / _normalizeMemoryUpdateData / _parseMemoryUpdateResponse / _applyUpdates</td><td>4 个解析合并</td></tr>
+      <tr><td>增强</td><td>_selectStaleCandidates / _buildStalenessSection / _selectConsolidationCandidates / _buildConsolidationSection / _escapeMemoryForPrompt / _stripUploadMentionsFromMemory</td><td>6 个增强功能</td></tr>
+      <tr><td>核心</td><td>MemoryUpdater.update / updateMemoryFromConversation</td><td>2 个入口</td></tr>
+    </table>
+  </div>
+
+  <div class="footer">DeerFlow 复刻 · 第 4 层总结 · 2026-07-22</div>
+</div>
+<script>
+mermaid.initialize({
+  startOnLoad: true, theme: 'default', securityLevel: 'loose',
+  themeVariables: {
+    primaryColor: '#eef2ff', primaryTextColor: '#171b22', primaryBorderColor: '#1f5cff',
+    lineColor: '#1f5cff', secondaryColor: '#f0fdf4', tertiaryColor: '#fbfaf6',
+    fontFamily: '"Aptos", "Segoe UI Variable Display", "Microsoft YaHei UI", sans-serif',
+    fontSize: '13px', actorBkg: '#eef2ff', actorBorder: '#1f5cff', actorTextColor: '#171b22',
+    signalColor: '#171b22', signalTextColor: '#171b22', noteBkgColor: '#fffbeb', noteTextColor: '#171b22', noteBorderColor: '#e87722',
+  },
+  sequence: { mirrorActors: false, boxMargin: 8, useMaxWidth: true }
+});
+</script>
+</body>
+</html>

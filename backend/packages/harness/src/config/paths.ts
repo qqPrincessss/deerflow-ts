@@ -16,7 +16,7 @@ export function validateUserId(userId: string): string {
     }
     return userId;
 }
-class Paths {
+export class Paths {
     private _baseDir?: string;
 
     // 基础目录（所有数据的根）
@@ -88,4 +88,13 @@ class Paths {
         const base = `${this.threadDir(threadId, userId)}/user-data`;
         return `${base}/${relative}`;
     }
+}
+
+let _defaultPaths: Paths | null = null;
+
+export function getPaths(): Paths {
+    if (!_defaultPaths) {
+        _defaultPaths = new Paths();
+    }
+    return _defaultPaths;
 }
