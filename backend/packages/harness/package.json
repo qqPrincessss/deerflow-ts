@@ -9,12 +9,13 @@
     "dev": "tsc --watch"
   },
   "dependencies": {
+    "@langchain/anthropic": "^0.3.0",
     "@langchain/core": "^0.3.0",
     "@langchain/openai": "^0.3.0",
-    "@langchain/anthropic": "^0.3.0",
-    "zod": "3.23.8",
+    "dotenv": "^16.5.0",
+    "gpt-tokenizer": "^3.4.0",
     "yaml": "^2.7.0",
-    "dotenv": "^16.5.0"
+    "zod": "3.23.8"
   },
   "devDependencies": {
     "typescript": "^5.8.0"

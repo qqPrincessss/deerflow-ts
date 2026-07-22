@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DeerFlow 记忆系统工作原理</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<style>
+:root {
+  --bg: #f6f3ec; --card-bg: #ffffff; --card-border: #ded7c8;
+  --text: #171b22; --text-secondary: #707682; --title: #1f5cff;
+  --blue: #1f5cff; --red: #dc3545; --green: #0f9960;
+  --orange: #e87722; --purple: #7c5cbf; --cyan: #0891b2;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: var(--bg); color: var(--text);
+  font-family: "Aptos", "Segoe UI Variable Display", "Microsoft YaHei UI", sans-serif;
+  min-height: 100vh; padding: 32px 24px 60px;
+}
+.page { max-width: 1200px; margin: 0 auto; }
+.page-header { text-align: center; margin-bottom: 40px; }
+.page-header h1 { font-size: 30px; font-weight: 800; letter-spacing: 1px;
+  background: linear-gradient(90deg, var(--blue), var(--purple), var(--cyan));
+  -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+  background-clip: text; }
+.page-header .subtitle { color: var(--text-secondary); font-size: 13px; margin-top: 8px; }
+.section {
+  background: var(--card-bg); border: 1px solid var(--card-border);
+  border-radius: 5px; padding: 28px 30px; margin-bottom: 28px;
+  box-shadow: 0 1px 3px rgba(31,92,255,0.04);
+  animation: fadeIn 0.5s ease-out both;
+}
+.section::before {
+  content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px;
+  background: linear-gradient(90deg, transparent, var(--accent, var(--blue)), transparent);
+}
+.section { position: relative; overflow: hidden; }
+.section h2 { font-size: 18px; font-weight: 700; color: var(--title); margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
+.section h2 .num {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px; border-radius: 5px;
+  background: rgba(31,92,255,0.08); color: var(--blue);
+  font-size: 14px; font-weight: 800;
+}
+.desc { color: var(--text-secondary); font-size: 13px; margin-bottom: 20px; line-height: 1.6; }
+.mermaid { display: flex; justify-content: center; padding: 16px 0; overflow-x: auto; }
+.code-box {
+  background: #f8f7f4; border: 1px solid var(--card-border);
+  border-radius: 5px; padding: 16px; font-family: 'Consolas', 'Courier New', monospace;
+  font-size: 13px; line-height: 1.5; overflow-x: auto; white-space: pre-wrap;
+}
+.compact-table { width: 100%; border-collapse: collapse; margin: 12px 0; }
+.compact-table td { padding: 8px 12px; border-bottom: 1px solid var(--card-border); font-size: 13px; }
+.compact-table tr:last-child td { border-bottom: none; }
+.label { display: inline-block; padding: 2px 10px; border-radius: 3px; font-size: 12px; font-weight: 600; }
+.label-ts { background: #3178c6; color: white; }
+.label-py { background: #3776ab; color: white; }
+.label-check { background: var(--green); color: white; }
+.label-empty { background: var(--red); color: white; }
+.label-half { background: var(--orange); color: white; }
+.footer { text-align: center; color: #adb1ba; font-size: 11px; margin-top: 40px; }
+@keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="page-header">
+    <h1>🧠 DeerFlow 记忆系统</h1>
+    <div class="subtitle">Deep Exploration and Efficient Research Flow — 记忆模块完整工作流程</div>
+  </div>
+
+  <!-- 1. 整体流程 -->
+  <div class="section" style="--accent: var(--blue);">
+    <h2><span class="num">1</span>完整工作流程</h2>
+    <div class="desc">从用户说话 → 提取记忆 → 保存 → 下次注入，一条完整链路</div>
+    <div class="mermaid">
+sequenceDiagram
+  participant User as 👤 用户
+  participant MW as 🔄 MemoryMiddleware
+  participant Queue as ⏳ queue.ts
+  participant Updater as 📝 updater.ts
+  participant LLM as 🧠 LLM
+  participant Prompt as 📋 prompt.ts
+  participant Storage as 💾 storage.ts
+  participant File as 📄 memory.json
+
+  User->>MW: "我喜欢用 TypeScript"
+  MW->>MW: 捕获对话片段
+  Note over MW,Queue: 等 30 秒（debounce）
+  MW->>Queue: 加入去抖队列
+
+  Queue->>Updater: 触发更新
+  Updater->>Storage: load() 读取当前记忆
+  Storage->>File: 读取 memory.json
+  File-->>Storage: 当前记忆数据
+  Storage-->>Updater: 记忆数据
+
+  Updater->>Prompt: buildMemoryUpdatePrompt(当前记忆, 对话)
+  Prompt-->>Updater: 构造好的提示模板
+  Updater->>LLM: 发送提示给 LLM
+  LLM-->>Updater: {"newFacts": [{"content": "偏好 TypeScript"}]}
+
+  Updater->>Storage: save(更新后的记忆)
+  Storage->>File: 写入 memory.json
+  Storage-->>Updater: true
+
+  Note over User,File: ───── 下次对话 ─────
+  User->>MW: "帮我写个脚本"
+  MW->>Storage: load() 读取记忆
+  Storage->>File: 读取 memory.json
+  File-->>Storage: 记忆数据
+  Storage->>Prompt: formatMemoryForInjection(记忆数据)
+  Prompt-->>MW: 格式化后的文本
+  MW->>MW: 注入到系统提示
+  MW->>LLM: 发送（含记忆的提示）
+  LLM-->>User: 用 TypeScript 写脚本...
+    </div>
+  </div>
+
+  <!-- 2. 四个模块的分工 -->
+  <div class="section" style="--accent: var(--purple);">
+    <h2><span class="num">2</span>四个模块的分工</h2>
+    <div class="desc">每个模块只做一件事，互不重叠</div>
+    <div class="mermaid">
+graph TB
+  classDef storage fill:#eef2ff,stroke:#1f5cff,stroke-width:2px
+  classDef prompt fill:#f5f3ff,stroke:#7c5cbf,stroke-width:2px
+  classDef updater fill:#fffbeb,stroke:#e87722,stroke-width:2px
+  classDef queue fill:#f0fdf4,stroke:#0f9960,stroke-width:2px
+
+  subgraph Storage["💾 storage.ts"]
+    S1["createEmptyMemory()"]
+    S2["FileMemoryStorage.load()"]
+    S3["FileMemoryStorage.save()"]
+    S4["FileMemoryStorage.reload()"]
+    S5["getMemoryStorage()"]
+  end
+
+  subgraph Prompt["📋 prompt.ts"]
+    P1["MEMORY_UPDATE_PROMPT"]
+    P2["STALENESS_REVIEW_PROMPT"]
+    P3["formatMemoryForInjection()"]
+    P4["buildMemoryUpdatePrompt()"]
+    P5["_countTokens()"]
+  end
+
+  subgraph Updater2["📝 updater.ts"]
+    U1["updateMemory()"]
+    U2["调用 LLM 提取事实"]
+    U3["合并新旧记忆"]
+  end
+
+  subgraph Queue2["⏳ queue.ts"]
+    Q1["去抖队列"]
+    Q2["批量处理"]
+  end
+
+  Updater2 -->|用| Prompt
+  Updater2 -->|存到| Storage
+  Queue2 -->|触发| Updater2
+
+  class Storage storage
+  class Prompt prompt
+  class Updater2 updater
+  class Queue2 queue
+    </div>
+  </div>
+
+  <!-- 3. 每个模块的职责 -->
+  <div class="section" style="--accent: var(--green);">
+    <h2><span class="num">3</span>模块职责详解</h2>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
+
+      <div style="background:#f8f7f4;border:1px solid var(--card-border);border-radius:5px;padding:16px;">
+        <h3 style="color:var(--blue);font-size:15px;margin-bottom:8px;">💾 storage.ts</h3>
+        <p style="font-size:13px;color:var(--text-secondary);line-height:1.6;">
+          <strong>只做</strong>：读写 memory.json<br>
+          <strong>不做</strong>：调 LLM、提取事实、去抖<br><br>
+          <span class="label label-check">已完成</span>
+        </p>
+      </div>
+
+      <div style="background:#f8f7f4;border:1px solid var(--card-border);border-radius:5px;padding:16px;">
+        <h3 style="color:var(--purple);font-size:15px;margin-bottom:8px;">📋 prompt.ts</h3>
+        <p style="font-size:13px;color:var(--text-secondary);line-height:1.6;">
+          <strong>只做</strong>：写提示模板 + 格式化记忆<br>
+          <strong>不做</strong>：调 LLM、读写文件<br><br>
+          <span class="label label-half">进行中</span>
+        </p>
+      </div>
+
+      <div style="background:#f8f7f4;border:1px solid var(--card-border);border-radius:5px;padding:16px;">
+        <h3 style="color:var(--orange);font-size:15px;margin-bottom:8px;">📝 updater.ts</h3>
+        <p style="font-size:13px;color:var(--text-secondary);line-height:1.6;">
+          <strong>只做</strong>：调 LLM 提取事实、合并结果<br>
+          <strong>不做</strong>：读写文件、去抖<br><br>
+          <span class="label label-empty">未开始</span>
+        </p>
+      </div>
+
+      <div style="background:#f8f7f4;border:1px solid var(--card-border);border-radius:5px;padding:16px;">
+        <h3 style="color:var(--cyan);font-size:15px;margin-bottom:8px;">⏳ queue.ts</h3>
+        <p style="font-size:13px;color:var(--text-secondary);line-height:1.6;">
+          <strong>只做</strong>：等 30 秒、批量触发更新<br>
+          <strong>不做</strong>：调 LLM、读写文件<br><br>
+          <span class="label label-empty">未开始</span>
+        </p>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- 4. memory.json 数据长这样 -->
+  <div class="section" style="--accent: var(--cyan);">
+    <h2><span class="num">4</span>memory.json 数据格式</h2>
+    <div class="desc">storage.ts 管理的物理文件</div>
+    <div class="code-box">{
+  "version": "1.0",
+  "lastUpdated": "2026-07-21T12:00:00Z",
+
+  "user": {                     ← 用户当前在做啥（每次都注入）
+    "workContext":    { "summary": "用户在做 AI 项目" },
+    "personalContext":{ "summary": "用户偏好 TypeScript" },
+    "topOfMind":     { "summary": "正在学 DeerFlow" }
+  },
+
+  "history": {                   ← 用户过去做了啥（偶尔注入）
+    "recentMonths":       { "summary": "上个月做了数据分析" },
+    "earlierContext":     { "summary": "去年学了 Python" },
+    "longTermBackground": { "summary": "5 年开发经验" }
+  },
+
+  "facts": [                     ← 具体事实（按置信度排序注入）
+    { "id": "abc", "content": "偏好 TypeScript", "category": "preference", "confidence": 0.9 },
+    { "id": "def", "content": "住在北京", "category": "personal", "confidence": 0.8 },
+    { "id": "ghi", "content": "在做 AI 项目", "category": "work", "confidence": 0.7 }
+  ]
+}</div>
+  </div>
+
+  <!-- 5. TODO 清单 -->
+  <div class="section" style="--accent: var(--red);">
+    <h2><span class="num">5</span>记忆系统 TODO</h2>
+    <table class="compact-table">
+      <tr>
+        <td><strong>storage.ts</strong></td>
+        <td><span class="label label-check">✅ 完成</span></td>
+        <td style="color:var(--text-secondary);font-size:13px;">读写 memory.json、缓存、原子写入、线程锁</td>
+      </tr>
+      <tr>
+        <td><strong>prompt.ts</strong></td>
+        <td><span class="label label-half">⚠️ 进行中</span></td>
+        <td style="color:var(--text-secondary);font-size:13px;">模板常量已写，函数待补（_countTokens、warmTiktokenCache、formatMemoryForInjection 等）</td>
+      </tr>
+      <tr>
+        <td><strong>updater.ts</strong></td>
+        <td><span class="label label-empty">⬜ 未开始</span></td>
+        <td style="color:var(--text-secondary);font-size:13px;">调用 LLM 提取事实、合并到现有记忆</td>
+      </tr>
+      <tr>
+        <td><strong>queue.ts</strong></td>
+        <td><span class="label label-empty">⬜ 未开始</span></td>
+        <td style="color:var(--text-secondary);font-size:13px;">30 秒去抖、批量触发 updater</td>
+      </tr>
+    </table>
+  </div>
+
+  <div class="footer">DeerFlow 记忆系统 · 2026-07-21</div>
+</div>
+
+<script>
+mermaid.initialize({
+  startOnLoad: true,
+  theme: 'default',
+  securityLevel: 'loose',
+  themeVariables: {
+    primaryColor: '#eef2ff', primaryTextColor: '#171b22', primaryBorderColor: '#1f5cff',
+    lineColor: '#1f5cff', secondaryColor: '#f0fdf4', tertiaryColor: '#fbfaf6',
+    fontFamily: '"Aptos", "Segoe UI Variable Display", "Microsoft YaHei UI", sans-serif',
+    fontSize: '13px', actorBkg: '#eef2ff', actorBorder: '#1f5cff', actorTextColor: '#171b22',
+    signalColor: '#171b22', signalTextColor: '#171b22', noteBkgColor: '#fffbeb',
+    noteTextColor: '#171b22', noteBorderColor: '#e87722',
+  },
+  sequence: { mirrorActors: false, boxMargin: 8, useMaxWidth: true }
+});
+</script>
+</body>
+</html>
