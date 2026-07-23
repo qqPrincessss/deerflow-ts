@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Agent 数据流转 — State + 对话数据</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#f6f3ec;color:#171b22;font-family:"Microsoft YaHei UI",sans-serif;padding:32px}
+.page{max-width:1000px;margin:0 auto}
+h1{font-size:24px;margin-bottom:8px;color:#1f5cff}
+.subtitle{color:#707682;font-size:14px;margin-bottom:32px}
+.card{background:#fff;border:1px solid #ded7c8;border-radius:8px;padding:24px;margin-bottom:24px;border-left:4px solid #1f5cff}
+.card h2{font-size:16px;margin-bottom:12px;color:#1f5cff}
+.card li{margin:8px 0;padding-left:16px;list-style:none;border-left:3px solid #e0e0e0;color:#444}
+.card li .fn{color:#1f5cff;font-weight:700}
+.card li .dir{color:#0f9960;font-size:12px}
+.card li .dir-in{color:#1f5cff}
+.card li .dir-out{color:#e87722}
+pre{background:#f8f7f4;border:1px solid #e5e1d8;border-radius:5px;padding:16px;font-size:13px;overflow-x:auto;line-height:1.5;margin:12px 0}
+pre .hl{color:#1f5cff}
+pre .hl2{color:#0f9960}
+pre .hl3{color:#e87722}
+pre .hl4{color:#7c5cbf}
+.arrow{text-align:center;color:#1f5cff;font-size:20px;margin:4px 0}
+.flow-box{display:flex;align-items:center;gap:12px;margin:8px 0}
+.flow-box .box{background:#eef2ff;border:1px solid #c8d7f2;border-radius:5px;padding:10px 14px;font-size:12px;flex:1;text-align:center}
+.flow-box .arrow{font-size:16px;flex:0 0 20px}
+.tag{display:inline-block;padding:2px 8px;border-radius:3px;font-size:11px;font-weight:700;margin:0 4px}
+.tag-blue{background:#eef2ff;color:#1f5cff}
+.tag-green{background:#f0fdf4;color:#0f9960}
+.tag-orange{background:#fffbeb;color:#e87722}
+.tag-purple{background:#f5f3ff;color:#7c5cbf}
+.tag-red{background:#fef2f2;color:#dc3545}
+</style>
+</head>
+<body>
+<div class="page">
+
+<h1>🔄 Agent 数据流转图</h1>
+<div class="subtitle">从用户输入到 AI 响应的完整数据路径 — State 怎么变、消息怎么流</div>
+
+<div class="card" style="border-left-color:#1f5cff">
+<h2>1. 总览：谁读写 State</h2>
+<pre>
+┌─────────────────────────────────────────────────────────────────┐
+│                       ThreadState（总账本）                      │
+│                                                                 │
+│  messages:    [human, ai, tool, ai, ...]    ← 中间件读写        │
+│  sandbox:     { sandbox_id: "..." }         ← sandbox_middleware │
+│  thread_data: { workspace, uploads, outputs } ← thread_data    │
+│  delegations: [{ id, status, result }]      ← durable_context   │
+│  skill_context: [{ name, path }]            ← durable_context   │
+│  summary_text: "用户要求分析..."            ← summarization     │
+│  viewed_images: { "path": { meta } }        ← view_image_tool   │
+│  artifacts: ["/mnt/.../report.md"]          ← present_file_tool  │
+│  uploaded_files: [{ filename, size }]       ← uploads middleware │
+│  title: "销售数据分析"                      ← title middleware   │
+│  todos: [{ content, status }]               ← todo middleware    │
+└─────────────────────────────────────────────────────────────────┘
+</pre>
+</div>
+
+<div class="card" style="border-left-color:#0f9960">
+<h2>2. 一轮完整对话的数据流</h2>
+
+<p style="font-size:13px;color:#707682;margin-bottom:12px">
+每一步数据长什么样？state 里的 messages 怎么变的？
+</p>
+
+<pre>
+<span class="hl">// ===== 第 0 步：初始 State =====
+{
+  "messages": [],
+  "sandbox": null,
+  "thread_data": null,
+  "delegations": [],
+  "skill_context": [],
+  "summary_text": null
+}</span>
+</pre>
+
+<div class="arrow">⬇︎ 用户发消息</div>
+
+<pre>
+<span class="hl2">// ===== 第 1 步：用户输入 → 中间件预处理 =====
+
+// thread_data 中间件写入：
+thread_data: {
+  workspace_path: ".deer-flow/threads/abc/user-data/workspace",
+  uploads_path:   ".deer-flow/threads/abc/user-data/uploads",
+  outputs_path:   ".deer-flow/threads/abc/user-data/outputs"
+}
+
+// uploads 中间件检测到上传文件，写入：
+uploaded_files: [{ filename: "data.xlsx", size: 10240, path: "/mnt/.../data.xlsx" }]
+
+// input_sanitization 检查消息内容：
+// "帮我分析 data.xlsx" → 没有 &lt;system&gt; 标签 → 原样通过
+
+// sandbox_middleware 初始化沙箱：
+sandbox: { sandbox_id: "local:default:abc" }
+</span>
+</pre>
+
+<div class="arrow">⬇︎ 第 1 次调 LLM</div>
+
+<pre>
+<span class="hl">// ===== 第 2 步：AI 回复 + 工具调用 =====
+
+// 现在 messages 里有：
+[
+  { type: "human", content: "帮我分析 data.xlsx" }, </span><span class="hl2">← 用户输入</span><span class="hl">
+  { type: "ai", content: null, tool_calls: [</span><span class="hl3">← AI 说要调工具</span><span class="hl">
+    { id: "call_001", name: "read_file", args: { path: "/mnt/.../data.xlsx" } }
+  ]},
+  { type: "tool", content: "日期,销售额,地区\n2025-01,100\n...", </span><span class="hl4">← 工具返回结果</span><span class="hl">
+    tool_call_id: "call_001" }
+]
+</span>
+</pre>
+
+<div class="arrow">⬇︎ AI 继续推理</div>
+
+<pre>
+<span class="hl3">// ===== 第 3 步：AI 回复完成 =====
+
+[
+  { type: "human", content: "帮我分析 data.xlsx" },
+  { type: "ai", tool_calls: [{ id: "call_001", name: "read_file" }] },
+  { type: "tool", content: "日期,销售额,地区...", tool_call_id: "call_001" },
+  { type: "ai", content: "数据有三列：日期、销售额、地区" } </span><span class="hl2">← AI 最终回复</span><span class="hl3">
+]
+
+// 后处理中间件：
+// title → 检测到第一次对话 → 生成标题 "销售数据分析"
+title: "销售数据分析"
+
+// durable_context → 没有子代理，没有技能读取 → 无操作
+
+// memory_middleware → 把对话加入记忆更新队列
+// 30 秒后 LLM 提取事实："用户分析了销售数据"
+</span>
+</pre>
+</div>
+
+<div class="card" style="border-left-color:#e87722">
+<h2>3. 带子代理的复杂数据流</h2>
+
+<pre>
+<span class="hl">// ===== 第 0 步：用户指派子代理 =====
+
+messages: [
+  { type: "human", content: "分别搜索三个城市的销售数据" },
+  { type: "ai", tool_calls: [
+    { id: "c1", name: "task", args: { description: "搜索北京数据" } },
+    { id: "c2", name: "task", args: { description: "搜索上海数据" } },
+    { id: "c3", name: "task", args: { description: "搜索广州数据" } }
+  ]}
+]
+
+// 子代理执行过程中，durable_context 逐步捕获：
+
+delegations: [
+  { id: "task_001", description: "搜索北京数据", status: "running" },
+  { id: "task_002", description: "搜索上海数据", status: "running" },
+  { id: "task_003", description: "搜索广州数据", status: "running" }
+]</span>
+</pre>
+
+<div class="arrow">⬇︎ 子代理陆续返回</div>
+
+<pre>
+<span class="hl2">// ===== 第 1 步：子代理结果捕获 =====
+
+// 第一个子代理完成 → durable_context 检测到变化
+delegations: [
+  { id: "task_001", description: "搜索北京数据",
+    status: "completed", result_brief: "销售额100万" },
+  { id: "task_002", description: "搜索上海数据", status: "running" },
+  { id: "task_003", description: "搜索广州数据", status: "running" }
+]
+
+// 第一个子代理完成 → durable_context 检测变化，只追加变化的部分
+// _filterChangedDelegations → task_001 状态从 running → completed
+// 只更新 task_001，不碰 task_002 和 task_003
+</span>
+</pre>
+
+<div class="arrow">⬇︎ 全部完成，AI 汇总</div>
+
+<pre>
+<span class="hl3">// ===== 第 2 步：AI 汇总结果 =====
+
+delegations: [
+  { id: "task_001", description: "搜索北京数据", status: "completed", result_brief: "销售额100万" },
+  { id: "task_002", description: "搜索上海数据", status: "completed", result_brief: "销售额200万" },
+  { id: "task_003", description: "搜索广州数据", status: "completed", result_brief: "销售额300万" }
+]
+</span>
+</pre>
+
+<div class="arrow">⬇︎ 对话太长，被压缩</div>
+
+<pre>
+<span class="hl4">// ===== 第 3 步：压缩后，injectDurableContext 救回数据 =====
+
+// summarization 把中间消息压缩了，messages 变短
+// 但 delegations 还在 state 里（state 不会被压缩）
+
+// injectDurableContext 在每次 LLM 调用前插入：
+{ type: "human", content: "&lt;durable_context_data&gt;
+## Conversation summary so far
+用户要求搜索三个城市的销售数据...
+
+## Delegation ledger
+- task_001: 搜索北京数据 → completed
+- task_002: 搜索上海数据 → completed
+- task_003: 搜索广州数据 → completed
+&lt;/durable_context_data&gt;", hide_from_ui: true }
+</span>
+</pre>
+</div>
+
+<div class="card" style="border-left-color:#7c5cbf">
+<h2>4. 中间件按顺序读写 State</h2>
+
+<pre>
+<span class="hl">输入 →</span> <span class="hl2">input_sanitization</span>     <span class="hl">→ 读 messages（检查注入），不改 state</span>
+       <span class="hl2">thread_data</span>             → 写 <span class="hl3">thread_data</span>（计算路径，可选创建目录）
+       <span class="hl2">uploads</span>                  → 写 <span class="hl3">uploaded_files</span>（注入上传文件信息）
+       <span class="hl2">sandbox_middleware</span>       → 写 <span class="hl3">sandbox</span>（获取沙箱）
+       <span class="hl2">dynamic_context</span>          → 插 <span class="hl3">messages</span>（注入日期 + 记忆）
+       <span class="hl2">skill_activation</span>         → 插 <span class="hl3">messages</span>（注入技能内容）
+       ──────── <span class="hl3">调 LLM</span> ────────
+       <span class="hl2">tool_progress</span>            → 读 messages + tool_meta（检测空转）
+       <span class="hl2">tool_error_handling</span>      → 写 <span class="hl3">tool_meta</span>（标记错误类型）
+       <span class="hl2">read_before_write</span>        → 读 messages（检查写前读）
+       <span class="hl2">durable_context</span>          → 写 <span class="hl3">delegations</span> + <span class="hl3">skill_context</span>
+       <span class="hl2">token_usage</span>              → 写 <span class="hl3">messages[].additional_kwargs</span>（归因标签）
+       <span class="hl2">title</span>                     → 写 <span class="hl3">title</span>（第一次对话时生成）
+       <span class="hl2">memory_middleware</span>         → 读 messages，加入记忆队列（30 秒后更新）
+       <span class="hl2">summarization</span>             → 写 <span class="hl3">summary_text</span> + 删 messages（太长时压缩）
+<span class="hl">输出 ←</span>
+</pre>
+</div>
+
+<div class="card" style="border-left-color:#dc3545">
+<h2>5. 关键：State 和 Messages 的关系</h2>
+
+<pre>
+<span class="hl4">// 💡 记住这三点：</span>
+
+<span class="hl2">1. messages 在 state 里面</span>
+   state = { messages: [...], sandbox: {...}, thread_data: {...}, ... }
+             ↑ messages 是 state 的一个字段
+
+<span class="hl2">2. 中间件可以读 messages（检查内容）也可以写 messages（插入新消息）</span>
+   - input_sanitization → 读 messages，不改（只是检查）
+   - dynamic_context → 写 messages（插入日期提醒）
+   - durable_context → 写 messages（注入持久上下文）
+
+<span class="hl2">3. 中间件也可以读写 state 的其他字段</span>
+   - thread_data → 写 state.thread_data（不碰 messages）
+   - durable_context → 写 state.delegations（不碰 messages）
+   - summarization → 写 state.summary_text + 删 messages（改 messages 也改其他字段）
+</pre>
+</div>
+
+<div class="card" style="border-left-color:#0f9960">
+<h2>6. 完整的 messages 数据结构</h2>
+
+<pre>
+<span class="hl">// 消息类型有三种，按顺序排列：</span>
+
+<span class="hl2">HumanMessage（用户）：</span>
+{ type: "human", id: "msg_001", content: "帮我分析数据", name: "user-input",
+  additional_kwargs: { run_id: "run_123", timestamp: "2026-07-23T10:00:00Z" } }
+
+<span class="hl3">AIMessage（AI 回复）：</span>
+{ type: "ai", id: "msg_002", content: "好的我要先读文件",
+  tool_calls: [{ id: "call_001", name: "read_file", args: { path: "..." } }],
+  usage_metadata: { input_tokens: 150, output_tokens: 30, total_tokens: 180 },
+  additional_kwargs: { token_usage_attribution: { version: 1, kind: "tool_batch",
+    actions: [{ kind: "tool", tool_name: "read_file" }] } } }
+
+<span class="hl4">ToolMessage（工具结果）：</span>
+{ type: "tool", id: "msg_003", content: "日期,销售额...",
+  tool_call_id: "call_001", name: "read_file", status: "success" }
+
+<span class="hl">// 隐藏消息（hide_from_ui=true，用户看不到）：</span>
+{ type: "human", content: "&lt;durable_context_data&gt;...&lt;/durable_context_data&gt;",
+  additional_kwargs: { hide_from_ui: true, durable_context_data: true } }
+
+{ type: "human", content: "&lt;slash_skill_activation&gt;...&lt;/slash_skill_activation&gt;",
+  additional_kwargs: { hide_from_ui: true, slash_skill_activation: true } }
+</pre>
+</div>
+
+</div>
+</body>
+</html>
