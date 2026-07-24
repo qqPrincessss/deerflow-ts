@@ -7,7 +7,8 @@
  */
 
 import { readFileSync, statSync } from "node:fs";
-import { resolve } from "node:path";
+import { resolve, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 
 import { z } from "zod";
@@ -31,8 +32,11 @@ import { SkillsConfigSchema } from "./skills_config.js";
 import { ToolSearchConfigSchema } from "./tool_search_config.js";
 import { ExtensionsConfigSchema } from "./extensions_config.js";
 
-// 加载 .env
+// 加载 .env — 先找当前目录，再找 harness 包目录（backend/packages/harness/.env）
 dotenv.config();
+const _thisFile = fileURLToPath(import.meta.url);
+const _harnessRoot = resolve(dirname(_thisFile), "../../");
+dotenv.config({ path: resolve(_harnessRoot, ".env") });
 
 // ─── 主 AppConfig schema ──────────────────────────────────────────────────
 

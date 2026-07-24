@@ -9,6 +9,10 @@
 
 /** 模块名到 npm 包名的映射（用于错误提示） */
 const MODULE_TO_PACKAGE_HINTS: Record<string, string> = {
+    "@langchain/openai": "@langchain/openai",
+    "@langchain/anthropic": "@langchain/anthropic",
+    "@langchain/google-genai": "@langchain/google-genai",
+    "@langchain/deepseek": "@langchain/deepseek",
     langchain_openai: "@langchain/openai",
     langchain_anthropic: "@langchain/anthropic",
     langchain_google_genai: "@langchain/google-genai",

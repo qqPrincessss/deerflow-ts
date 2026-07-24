@@ -10,9 +10,8 @@
 export const MCP_TOOL_METADATA_KEY = "deerflow_mcp";
 export const MCP_TOOL_ROUTING_METADATA_KEY = "deerflow_mcp_routing";
 
-export interface ToolLike {
-    metadata?: Record<string, unknown>;
-}
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export type ToolLike = any;
 
 /**
  * 标记工具为 MCP 来源。

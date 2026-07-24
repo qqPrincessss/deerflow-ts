@@ -1,14 +1,23 @@
 /**
- * DeerFlow Agent 工厂 — 创建可执行的 Agent 实例。
+ * DeerFlow Agent 工厂 — 使用 @langchain/langgraph 的 StateGraph 构建 Agent。
  *
  * 对应原项目：backend/packages/harness/deerflow/agents/factory.py
+ * 但使用 LangGraph 而非手写 agent 循环。
  *
- * 集成 31 个中间件到 Agent 执行循环中。
- * 使用 LangChain BaseChatModel 调用 LLM。
+ * 节点：
+ *   "agent" — 调 LLM（含 beforeModel / afterModel 中间件）
+ *   "tools" — 执行工具（含 beforeToolCall / afterToolCall 中间件）
+ *
+ * 路由：
+ *   agent → 有 tool_calls ? "tools" : __end__
+ *   tools → agent
  */
 
-import { HumanMessage, SystemMessage, ToolMessage } from "@langchain/core/messages";
-import { type BaseChatModel } from "@langchain/core/language_models/chat_models";
+import { StateGraph, Annotation, END, START, messagesStateReducer, MemorySaver, Command } from "@langchain/langgraph";
+import { BaseMessage, AIMessage, ToolMessage, HumanMessage, SystemMessage } from "@langchain/core/messages";
+import type { BaseChatModel } from "@langchain/core/language_models/chat_models";
+import type { RunnableConfig } from "@langchain/core/runnables";
+import type { ToolCall as LangChainToolCall } from "@langchain/core/messages/tool";
 
 // ════════════════════════════════════════════════════════════════════════════════
 // 消息类型
@@ -47,6 +56,9 @@ export interface RuntimeContext {
     oauth_id?: string;
     app_config?: Record<string, unknown>;
     disable_clarification?: boolean;
+    subagent_enabled?: boolean;
+    max_concurrent_subagents?: number;
+    max_total_subagents?: number;
     [key: string]: unknown;
 }
 
@@ -70,7 +82,39 @@ export interface MiddlewareHooks {
 }
 
 // ════════════════════════════════════════════════════════════════════════════════
-// 中间件组装
+// LangGraph State 定义
+// ════════════════════════════════════════════════════════════════════════════════
+
+/** 延迟工具提升状态。 */
+interface PromotedState {
+    catalog_hash?: string;
+    names?: string[];
+}
+
+/**
+ * DeerFlow Agent 的 LangGraph 状态定义。
+ * 对应原项目 ThreadState。
+ */
+const AgentState = Annotation.Root({
+    /** 对话消息列表。使用 built-in reducer 自动追加。 */
+    messages: Annotation<BaseMessage[]>({
+        reducer: messagesStateReducer,
+        default: () => [],
+    }),
+    /** 运行时上下文信息（一次性设值）。 */
+    thread_id: Annotation<string>({ default: () => "", reducer: (a, b) => b || a }),
+    run_id: Annotation<string>({ default: () => "", reducer: (a, b) => b || a }),
+    user_id: Annotation<string>({ default: () => "", reducer: (a, b) => b || a }),
+    agent_name: Annotation<string>({ default: () => "", reducer: (a, b) => b || a }),
+    /** 延迟工具提升状态。tool_search 工具通过 Command 写入此字段。 */
+    promoted: Annotation<PromotedState>({
+        default: () => ({}),
+        reducer: (a, b) => ({ ...a, ...b }),
+    }),
+});
+
+// ════════════════════════════════════════════════════════════════════════════════
+// 运行时功能特性
 // ════════════════════════════════════════════════════════════════════════════════
 
 export interface RuntimeFeatures {
@@ -86,14 +130,17 @@ export interface RuntimeFeatures {
     plan_mode?: boolean;
 }
 
+// ════════════════════════════════════════════════════════════════════════════════
+// 中间件导入
+// ════════════════════════════════════════════════════════════════════════════════
+
 import { tryProcessSanitizeRequest } from "./middlewares/input_sanitization.js";
-import { applyToolOutputBudget, applyBudgetToHistory } from "./middlewares/tool_output_budget.js";
+import { applyBudgetToHistory } from "./middlewares/tool_output_budget.js";
 import { sanitizeToolResult } from "./middlewares/tool_result_sanitization.js";
 import { setupThreadData } from "./middlewares/thread_data.js";
-import { setupUploads } from "./middlewares/uploads.js";
 import { wrapToolCallWithSandbox, beforeAgentSandbox } from "./middlewares/sandbox_middleware.js";
 import { fixDanglingToolCalls } from "./middlewares/dangling_tool_call.js";
-import { auditBashCommand, buildBlockMessage, buildWarnSuffix } from "./middlewares/sandbox_audit.js";
+import { auditBashCommand } from "./middlewares/sandbox_audit.js";
 import { checkWriteGate, attachReadMark } from "./middlewares/read_before_write.js";
 import { injectDynamicContext } from "./middlewares/dynamic_context.js";
 import { processSlashSkillActivation } from "./middlewares/skill_activation.js";
@@ -114,9 +161,15 @@ import { applySafetyFinishReason } from "./middlewares/safety_finish_reason.js";
 import { TerminalResponseTracker } from "./middlewares/terminal_response.js";
 import { handleClarification } from "./middlewares/clarification.js";
 import { normalizeToolResult } from "./middlewares/tool_result_meta.js";
+import { extractResponseText } from "../utils/llm_text.js";
+
+// ════════════════════════════════════════════════════════════════════════════════
+// 中间件组装
+// ════════════════════════════════════════════════════════════════════════════════
 
 /**
- * 根据功能开关组装中间件链。
+ * 根据功能开关组装中间件钩子链。
+ * 返回的 hooks 会在 LandGraph 节点内部被调用。
  */
 function assembleMiddlewareHooks(features: RuntimeFeatures, context: RuntimeContext): MiddlewareHooks {
     const hooks: MiddlewareHooks = {
@@ -130,16 +183,10 @@ function assembleMiddlewareHooks(features: RuntimeFeatures, context: RuntimeCont
 
     // ── [1-3] 输入处理 ──
     hooks.beforeModel.push((msgs: any) => tryProcessSanitizeRequest(msgs));
-    hooks.beforeModel.push((msgs) => {
-        // tool_output_budget 对历史消息截断
-        return applyBudgetToHistory(msgs);
-    });
-    hooks.afterToolCall.push((result, tc) => {
-        // tool_result_sanitization：远程内容标签转义
-        return sanitizeToolResult(tc.name, result);
-    });
+    hooks.beforeModel.push((msgs) => applyBudgetToHistory(msgs));
+    hooks.afterToolCall.push((result, tc) => sanitizeToolResult(tc.name, result));
 
-    // ── [4-6] 环境准备 ──
+    // ── [4] ThreadData ──
     if (features.sandbox !== false) {
         hooks.beforeAgent.push((ctx) => {
             if (ctx.thread_id) {
@@ -149,18 +196,13 @@ function assembleMiddlewareHooks(features: RuntimeFeatures, context: RuntimeCont
     }
 
     // ── [7] DanglingToolCall ──
-    hooks.beforeModel.push((msgs) => {
-        const fixed = fixDanglingToolCalls(msgs);
-        return fixed ?? msgs;
-    });
+    hooks.beforeModel.push((msgs) => fixDanglingToolCalls(msgs) ?? msgs);
 
     // ── [9] SandboxAudit ──
     hooks.beforeToolCall.push((tc) => {
         if (tc.name === "bash") {
             const audited = auditBashCommand(String(tc.args.command ?? ""), context.thread_id);
-            if (audited.verdict === "block") {
-                return null; // 阻断
-            }
+            if (audited.verdict === "block") return null;
         }
         return tc;
     });
@@ -175,109 +217,155 @@ function assembleMiddlewareHooks(features: RuntimeFeatures, context: RuntimeCont
         return tc;
     });
     hooks.afterToolCall.push((result, tc) => {
-        if (tc.name === "read_file") {
-            attachReadMark(tc as any, result as any, () => "");
-        }
+        if (tc.name === "read_file") attachReadMark(tc as any, result as any, () => "");
         return result;
     });
 
     // ── [13] DynamicContext ──
     hooks.beforeModel.push((msgs) => {
         const result = injectDynamicContext(msgs, context.agent_name);
-        if (result?.messages) return result.messages as Message[];
-        return msgs;
+        return result?.messages ? (result.messages as Message[]) : msgs;
     });
 
     // ── [15] SkillActivation ──
     hooks.beforeModel.push((msgs) => {
         const result = processSlashSkillActivation(msgs, context);
-        if (result?.messages) return result.messages as Message[];
-        return msgs;
+        return result?.messages ? (result.messages as Message[]) : msgs;
     });
 
     // ── [16] DurableContext ──
-    hooks.beforeModel.push((msgs) => {
-        return injectDurableContext(msgs);
-    });
-    hooks.afterModel.push((msgs) => {
-        captureDurableContext(msgs, context);
-        return null;
-    });
+    hooks.beforeModel.push((msgs) => injectDurableContext(msgs));
+    hooks.afterModel.push((msgs) => { captureDurableContext(msgs, context); return null; });
+
+    // ── [17] Summarization ──
+    if (features.summarization) {
+        hooks.afterModel.push((msgs) => {
+            if (shouldSummarize(msgs)) {
+                applySummarization(msgs, async (prompt: string) => {
+                    // summarization 回调由 summarization middleware 提供
+                    return null;
+                });
+            }
+            return null;
+        });
+    }
 
     // ── [18] Todo ──
-    const todoTracker = new TodoTracker();
-    const runId = context.run_id ?? "default";
-    const threadId = context.thread_id ?? "default";
+    if (features.plan_mode) {
+        const todoTracker = new TodoTracker();
+        hooks.afterModel.push((msgs) => {
+            const reminder = (todoTracker as any).detectContextLoss?.(msgs, []) ?? null;
+            return reminder ? { messages: [...msgs, reminder] } : null;
+        });
+    }
 
     // ── [19] TokenUsage ──
-    let tokenUsageState: { messages: Message[] } = { messages: [] };
     hooks.afterModel.push((msgs) => {
-        tokenUsageState.messages = msgs;
-        annotateTokenUsage(msgs, []); // todos 外部传入
+        annotateTokenUsage(msgs, []);
         return null;
     });
 
     // ── [20] Title ──
-    let titleGenerated = false;
-    hooks.afterModel.push((msgs) => {
-        if (!titleGenerated && msgs.length >= 2) {
-            const result = generateTitle(msgs);
-            if (result?.title) titleGenerated = true;
-        }
-        return null;
-    });
+    if (features.auto_title) {
+        let titleGenerated = false;
+        hooks.afterModel.push((msgs) => {
+            if (!titleGenerated && msgs.length >= 2) {
+                const result = generateTitle(msgs);
+                if (result?.title) titleGenerated = true;
+            }
+            return null;
+        });
+    }
+
+    // ── [21] Memory ──
+    if (features.memory) {
+        hooks.afterModel.push((msgs) => {
+            queueMemoryUpdate(msgs as any, context.thread_id ?? "", context.agent_name);
+            return null;
+        });
+    }
+
+    // ── [22] ViewImage ──
+    if (features.vision) {
+        hooks.beforeModel.push((msgs) => {
+            // ViewImageMiddleware 在 agent.py 中作用于 state 级别
+            // 在 messages 模式中暂简化处理
+            return msgs;
+        });
+    }
+
+    // ── [23] McpRouting ──
+    // 由 tool_search 构建时动态注入
+
+    // ── [24] DeferredToolFilter ──
+    // 由 tool_search 构建时动态注入
 
     // ── [25] SubagentLimit ──
-    hooks.afterModel.push((msgs) => {
-        truncateTaskCalls(msgs, null, context);
-        return null;
-    });
+    if (features.subagent) {
+        hooks.afterModel.push((msgs) => {
+            truncateTaskCalls(msgs, null, context);
+            return null;
+        });
+    }
 
     // ── [26] LoopDetection ──
-    const loopDetector = new LoopDetector();
-    hooks.afterModel.push((msgs) => {
-        loopDetector.apply(msgs, threadId, runId);
-        return null;
-    });
-    hooks.beforeModel.push((msgs) => {
-        const augmented = loopDetector.augmentRequest(msgs, threadId, runId);
-        return augmented ?? msgs;
-    });
+    if (features.loop_detection) {
+        const loopDetector = new LoopDetector();
+        const threadId = context.thread_id ?? "default";
+        const runId = context.run_id ?? "default";
+        hooks.afterModel.push((msgs) => {
+            loopDetector.apply(msgs, threadId, runId);
+            return null;
+        });
+        hooks.beforeModel.push((msgs) => {
+            const augmented = loopDetector.augmentRequest(msgs, threadId, runId);
+            return augmented ?? msgs;
+        });
+    }
 
     // ── [27] TokenBudget ──
-    const budgetTracker = new TokenBudgetTracker({
-        enabled: true,
-        max_tokens: 100000,
-        max_input_tokens: 0,
-        max_output_tokens: 0,
-        warn_threshold: 0.7,
-        hard_stop_threshold: 1.0,
-    });
-    hooks.afterModel.push((msgs) => {
-        budgetTracker.apply(msgs, runId);
-        return null;
-    });
-    hooks.beforeModel.push((msgs) => {
-        const warnings = budgetTracker.drainPendingWarnings(runId);
-        const injected = budgetTracker.injectWarnings(msgs, warnings);
-        return injected ?? msgs;
-    });
+    if (features.token_budget) {
+        const budgetTracker = new TokenBudgetTracker({
+            enabled: true,
+            max_tokens: 100000,
+            max_input_tokens: 0,
+            max_output_tokens: 0,
+            warn_threshold: 0.7,
+            hard_stop_threshold: 1.0,
+        });
+        const runId = context.run_id ?? "default";
+        hooks.afterModel.push((msgs) => {
+            budgetTracker.apply(msgs, runId);
+            return null;
+        });
+        hooks.beforeModel.push((msgs) => {
+            const warnings = budgetTracker.drainPendingWarnings(runId);
+            if (warnings.length > 0) {
+                const warningMsgs = warnings.map(
+                    (w: string) => ({ type: "system" as const, content: w }),
+                );
+                return [...warningMsgs, ...msgs];
+            }
+            return msgs;
+        });
+    }
 
     // ── [28] SafetyFinishReason ──
     hooks.afterModel.push((msgs) => {
         const result = applySafetyFinishReason(msgs);
-        if (result?.messages) return result;
-        return null;
+        return result?.messages ? result : null;
     });
 
     // ── [29] TerminalResponse ──
     const terminalTracker = new TerminalResponseTracker();
+    const threadIdT = context.thread_id ?? "default";
+    const runIdT = context.run_id ?? "default";
     hooks.afterModel.push((msgs) => {
-        const result = terminalTracker.apply(msgs, threadId, runId);
+        const result = terminalTracker.apply(msgs, threadIdT, runIdT);
         return result ?? null;
     });
     hooks.beforeModel.push((msgs) => {
-        const augmented = terminalTracker.augmentRequest(msgs, threadId, runId);
+        const augmented = terminalTracker.augmentRequest(msgs, threadIdT, runIdT);
         return augmented ?? msgs;
     });
 
@@ -292,7 +380,7 @@ function assembleMiddlewareHooks(features: RuntimeFeatures, context: RuntimeCont
 }
 
 // ════════════════════════════════════════════════════════════════════════════════
-// Agent 实例
+// Agent 实例接口
 // ════════════════════════════════════════════════════════════════════════════════
 
 export interface AgentInstance {
@@ -308,7 +396,7 @@ export interface AgentInstance {
 }
 
 // ════════════════════════════════════════════════════════════════════════════════
-// 工厂
+// 工厂配置
 // ════════════════════════════════════════════════════════════════════════════════
 
 export interface AgentFactoryOptions {
@@ -324,220 +412,323 @@ export interface AgentFactoryOptions {
     name?: string;
 }
 
-export function createDeerFlowAgent(options: AgentFactoryOptions): AgentInstance {
-    const { model, tools, systemPrompt, features = {}, context = {}, name = "deerflow" } = options;
-    const hooks = assembleMiddlewareHooks(features, context);
+// ════════════════════════════════════════════════════════════════════════════════
+// LangGraph 节点函数
+// ════════════════════════════════════════════════════════════════════════════════
 
-    function prepareMessages(input: string | Message[]): Message[] {
-        const messages: Message[] = Array.isArray(input) ? [...input] : [{ type: "human", content: input }];
+type GraphState = typeof AgentState.State;
+
+/**
+ * 构建 agent 节点函数。
+ * 调用 LLM，并在前后执行 beforeModel / afterModel 中间件。
+ */
+function buildAgentNode(
+    model: BaseChatModel,
+    hooks: MiddlewareHooks,
+    context: RuntimeContext,
+    systemPrompt?: string,
+) {
+    return async (state: GraphState, config?: RunnableConfig): Promise<Partial<GraphState>> => {
+        let messages = [...state.messages];
+
+        // ── beforeModel 中间件 ──
+        for (const hook of hooks.beforeModel) {
+            messages = hook(messages, context) as BaseMessage[];
+        }
+
+        // ── 插入系统提示 ──
         if (systemPrompt) {
-            const hasSystem = messages.length > 0 && messages[0].type === "system";
-            if (!hasSystem) messages.unshift({ type: "system", content: systemPrompt });
-        }
-        return messages;
-    }
-
-    function toLangChainMessages(messages: Message[]): any[] {
-        return messages.map((m) => {
-            switch (m.type) {
-                case "human":
-                    return new HumanMessage({ content: m.content, additional_kwargs: m.additional_kwargs ?? {} });
-                case "ai":
-                    return {
-                        constructor: { name: "AIMessage" },
-                        content: m.content,
-                        tool_calls: m.tool_calls?.map((tc) => ({
-                            id: tc.id,
-                            name: tc.name,
-                            args: tc.args,
-                            type: "tool_call",
-                        })),
-                        additional_kwargs: m.additional_kwargs ?? {},
-                    };
-                case "tool":
-                    return new ToolMessage({
-                        content: m.content,
-                        tool_call_id: m.tool_call_id ?? "",
-                        name: m.name,
-                        status: (m.status === "error" ? "error" : "success") as "success" | "error",
-                        additional_kwargs: m.additional_kwargs,
-                    });
-                case "system":
-                    return new SystemMessage(m.content);
-                default:
-                    return new HumanMessage(m.content);
-            }
-        });
-    }
-
-    function extractToolCalls(lcMessage: any): ToolCall[] {
-        if (lcMessage.tool_calls && Array.isArray(lcMessage.tool_calls)) {
-            return lcMessage.tool_calls.map((tc: any) => ({
-                id: tc.id ?? tc.name,
-                name: tc.name,
-                args: tc.args ?? {},
-            }));
-        }
-        const raw = lcMessage.additional_kwargs?.tool_calls;
-        if (raw && Array.isArray(raw)) {
-            return raw.map((tc: any) => ({
-                id: tc.id ?? tc.function?.name ?? "unknown",
-                name: tc.function?.name ?? tc.name ?? "unknown",
-                args: (() => {
-                    try { return JSON.parse(tc.function?.arguments ?? "{}"); } catch { return {}; }
-                })(),
-            }));
-        }
-        return [];
-    }
-
-    async function executeTool(tc: ToolCall): Promise<Message> {
-        // beforeToolCall 中间件
-        let currentTc: ToolCall | null = tc;
-        for (const hook of hooks.beforeToolCall) {
-            currentTc = hook(currentTc, context);
-            if (currentTc === null) {
-                return { type: "tool", content: `Tool '${tc.name}' was blocked by middleware`, tool_call_id: tc.id, name: tc.name, status: "error" };
+            const firstMsg = messages[0] as unknown as Record<string, unknown> | undefined;
+            const hasSystem = firstMsg?.type === "system";
+            if (!hasSystem) {
+                messages = [new SystemMessage(systemPrompt), ...messages];
             }
         }
 
-        // 执行工具
-        const tool = tools.find((t) => t.name === currentTc!.name);
-        if (!tool) {
-            return { type: "tool", content: `Unknown tool: ${currentTc!.name}`, tool_call_id: currentTc!.id, name: currentTc!.name, status: "error" };
+        // ── 合并连续的系统消息 ──
+        const coalesced = coalesceSystemMessages(null, messages as unknown as Record<string, unknown>[]);
+        if (coalesced?.messages) {
+            messages = coalesced.messages as unknown as BaseMessage[];
         }
 
-        let result: Message;
-        try {
-            const output = await tool.invoke(currentTc!.args);
-            result = {
-                type: "tool",
-                content: typeof output === "string" ? output : JSON.stringify(output),
-                tool_call_id: currentTc!.id,
+        // ── 调 LLM ──
+        const response = await model.invoke(messages, config);
+        messages = [...messages, response];
+
+        // ── afterModel 中间件 ──
+        for (const hook of hooks.afterModel) {
+            const result = hook(messages, context);
+            if (result?.messages) {
+                messages = result.messages as BaseMessage[];
+            }
+        }
+
+        return { messages };
+    };
+}
+
+/**
+ * 构建 tools 节点函数。
+ * 执行 AI 消息中的工具调用，并在前后执行 beforeToolCall / afterToolCall 中间件。
+ */
+function buildToolsNode(
+    tools: AgentFactoryOptions["tools"],
+    hooks: MiddlewareHooks,
+    context: RuntimeContext,
+) {
+    return async (state: GraphState): Promise<Partial<GraphState>> => {
+        const lastMessage = state.messages[state.messages.length - 1];
+        const toolCalls = (lastMessage as AIMessage)?.tool_calls ?? [];
+        if (toolCalls.length === 0) return {};
+
+        const results: ToolMessage[] = [];
+
+        for (const tc of toolCalls) {
+            // ── beforeToolCall 中间件 ──
+            let currentTc: LangChainToolCall | null = tc;
+            for (const hook of hooks.beforeToolCall) {
+                const mapped = hook(
+                    { id: currentTc.id ?? "", name: currentTc.name ?? "", args: currentTc.args ?? {} },
+                    context,
+                );
+                if (mapped === null) {
+                    currentTc = null;
+                    break;
+                }
+                currentTc = mapped as unknown as LangChainToolCall;
+            }
+            if (!currentTc) continue;
+
+            // ── 查找并执行工具 ──
+            const tool = tools.find((t) => t.name === currentTc!.name);
+            if (!tool) {
+                results.push(new ToolMessage({
+                    content: `Unknown tool: ${currentTc!.name}`,
+                    tool_call_id: currentTc!.id ?? currentTc!.name ?? "",
+                    name: currentTc!.name,
+                    status: "error",
+                }));
+                continue;
+            }
+
+            let rawResult: unknown;
+            try {
+                rawResult = await tool.invoke(currentTc!.args ?? {});
+            } catch (error) {
+                rawResult = `Error: ${(error as Error).message}`;
+            }
+
+            const contentStr = typeof rawResult === "string"
+                ? rawResult
+                : JSON.stringify(rawResult);
+
+            let toolMessage = new ToolMessage({
+                content: contentStr,
+                tool_call_id: currentTc!.id ?? currentTc!.name ?? "",
                 name: currentTc!.name,
                 status: "success",
-            };
-        } catch (error) {
-            result = {
-                type: "tool",
-                content: `Error: ${(error as Error).message}`,
-                tool_call_id: currentTc!.id,
-                name: currentTc!.name,
-                status: "error",
-            };
+            });
+
+            // ── afterToolCall 中间件 ──
+            for (const hook of hooks.afterToolCall) {
+                toolMessage = hook(toolMessage, {
+                    id: currentTc!.id ?? "",
+                    name: currentTc!.name ?? "",
+                    args: currentTc!.args ?? {},
+                }, context) as ToolMessage;
+            }
+
+            // ── 打 deerflow_tool_meta ──
+            normalizeToolResult(toolMessage as any);
+
+            results.push(toolMessage);
         }
 
-        // afterToolCall 中间件
-        for (const hook of hooks.afterToolCall) {
-            result = hook(result, currentTc!, context);
-        }
+        return { messages: results };
+    };
+}
 
-        // 打 deerflow_tool_meta
-        normalizeToolResult(result as any);
+/**
+ * 条件路由：判断是否需要继续调工具。
+ * agent → 有 tool_calls → "tools"，否则 → __end__
+ */
+function shouldContinue(state: GraphState): string | typeof END {
+    const messages = state.messages;
+    if (messages.length === 0) return END;
+    const lastMessage = messages[messages.length - 1];
+    const toolCalls = (lastMessage as AIMessage)?.tool_calls;
+    if (toolCalls && toolCalls.length > 0) {
+        return "tools";
+    }
+    return END;
+}
 
-        return result;
+// ════════════════════════════════════════════════════════════════════════════════
+// 辅助：消息格式转换
+// ════════════════════════════════════════════════════════════════════════════════
+
+function toLangChainMessage(msg: Message): BaseMessage {
+    switch (msg.type) {
+        case "human":
+            return new HumanMessage({ content: msg.content, additional_kwargs: msg.additional_kwargs ?? {} });
+        case "ai":
+            return new AIMessage({
+                content: msg.content,
+                tool_calls: msg.tool_calls?.map((tc) => ({
+                    id: tc.id,
+                    name: tc.name,
+                    args: tc.args,
+                    type: "tool_call" as const,
+                })),
+                additional_kwargs: msg.additional_kwargs ?? {},
+            });
+        case "tool":
+            return new ToolMessage({
+                content: msg.content,
+                tool_call_id: msg.tool_call_id ?? "",
+                name: msg.name,
+                status: (msg.status === "error" ? "error" : "success") as "success" | "error",
+                additional_kwargs: msg.additional_kwargs,
+            });
+        case "system":
+            return new SystemMessage(msg.content);
+        default:
+            return new HumanMessage(msg.content);
+    }
+}
+
+function fromLangChainMessage(msg: BaseMessage): Message {
+    const msgAny = msg as unknown as Record<string, unknown>;
+    const base: Message = {
+        type: (msgAny.type as "human" | "ai" | "tool" | "system") ?? "human",
+        content: extractResponseText(msg.content),
+    };
+    const aiMsg = msg as AIMessage;
+    if (aiMsg.tool_calls) {
+        base.tool_calls = aiMsg.tool_calls.map((tc) => ({
+            id: tc.id ?? tc.name,
+            name: tc.name,
+            args: tc.args ?? {},
+        }));
+    }
+    const toolMsg = msg as ToolMessage;
+    if (toolMsg.tool_call_id) base.tool_call_id = toolMsg.tool_call_id;
+    if (toolMsg.name) base.name = toolMsg.name;
+    if (toolMsg.status) base.status = toolMsg.status as string;
+    if (msg.additional_kwargs && Object.keys(msg.additional_kwargs).length > 0) {
+        base.additional_kwargs = msg.additional_kwargs as Record<string, unknown>;
+    }
+    const usage = (msg as unknown as Record<string, unknown>).usage_metadata;
+    if (usage) base.usage_metadata = usage as Record<string, unknown>;
+    return base;
+}
+
+// ════════════════════════════════════════════════════════════════════════════════
+// 工厂入口
+// ════════════════════════════════════════════════════════════════════════════════
+
+/**
+ * 创建 DeerFlow Agent 实例。
+ * 内部使用 @langchain/langgraph 的 StateGraph 构建 agent 图。
+ *
+ * @param options 配置选项
+ * @returns AgentInstance
+ */
+export function createDeerFlowAgent(options: AgentFactoryOptions): AgentInstance {
+    const {
+        model,
+        tools,
+        systemPrompt,
+        features = {},
+        context = {},
+        name = "deerflow",
+    } = options;
+
+    // 组装中间件
+    const hooks = assembleMiddlewareHooks(features, context);
+
+    // ── beforeAgent ──
+    for (const hook of hooks.beforeAgent) {
+        hook(context);
     }
 
-    return {
-        name,
+    // ── 构建 LangGraph ──
+    const agentNode = buildAgentNode(model, hooks, context, systemPrompt);
+    const toolsNode = buildToolsNode(tools, hooks, context);
 
-        async invoke(input: string | Message[], config?: { maxTurns?: number }) {
-            let messages = prepareMessages(input);
-            const maxTurns = config?.maxTurns ?? 10;
+    const graph = new StateGraph(AgentState)
+        .addNode("agent", agentNode)
+        .addNode("tools", toolsNode)
+        .addEdge(START, "agent")
+        .addConditionalEdges("agent", shouldContinue)
+        .addEdge("tools", "agent")
+        .compile();
 
-            // beforeAgent
-            for (const hook of hooks.beforeAgent) hook(context);
+    // ── 封装 invoke / stream ──
 
-            for (let turn = 0; turn < maxTurns; turn++) {
-                // beforeModel
-                for (const hook of hooks.beforeModel) {
-                    messages = hook(messages, context);
-                }
+    async function invoke(
+        input: string | Message[],
+        invokeConfig?: { maxTurns?: number },
+    ): Promise<{ messages: Message[]; finalOutput: string }> {
+        const inputMessages: BaseMessage[] = Array.isArray(input)
+            ? input.map(toLangChainMessage)
+            : [new HumanMessage(input)];
 
-                // 系统消息合并
-                const coalesced = coalesceSystemMessages(null, messages);
-                if (coalesced && coalesced.messages) messages = coalesced.messages as Message[];
+        const state = await graph.invoke(
+            { messages: inputMessages },
+            { recursionLimit: invokeConfig?.maxTurns ?? 25 },
+        );
 
-                // 调 LLM
-                const lcMessages = toLangChainMessages(messages);
-                const response = await model.invoke(lcMessages);
+        const messages: Message[] = (state.messages as BaseMessage[]).map(fromLangChainMessage);
 
-                const content = typeof response.content === "string" ? response.content : JSON.stringify(response.content);
-                const toolCalls = extractToolCalls(response);
+        // ── afterAgent ──
+        for (const hook of hooks.afterAgent) {
+            hook(context);
+        }
 
-                const aiMessage: Message = {
-                    type: "ai",
-                    content,
-                    tool_calls: toolCalls,
-                    usage_metadata: (response as any).usage_metadata,
-                    additional_kwargs: (response as any).additional_kwargs,
-                    response_metadata: (response as any).response_metadata,
-                };
-                messages.push(aiMessage);
+        const lastMsg = messages[messages.length - 1];
+        return {
+            messages,
+            finalOutput: lastMsg?.content ?? "",
+        };
+    }
 
-                // afterModel
-                for (const hook of hooks.afterModel) {
-                    const result = hook(messages, context);
-                    if (result?.messages) messages = result.messages as Message[];
-                }
+    async function* stream(
+        input: string | Message[],
+        streamConfig?: { maxTurns?: number },
+    ): AsyncIterable<{ type: "message" | "tool_call" | "tool_result"; content: Message }> {
+        const inputMessages: BaseMessage[] = Array.isArray(input)
+            ? input.map(toLangChainMessage)
+            : [new HumanMessage(input)];
 
-                if (!toolCalls || toolCalls.length === 0) {
-                    const lastMsg = messages[messages.length - 1];
-                    return { messages, finalOutput: lastMsg?.content ?? "" };
-                }
+        const stream = await graph.stream(
+            { messages: inputMessages },
+            { recursionLimit: streamConfig?.maxTurns ?? 25 },
+        );
 
-                // 执行工具
-                for (const tc of toolCalls) {
-                    const result = await executeTool(tc);
-                    messages.push(result);
-                }
-            }
+        for await (const chunk of stream) {
+            // chunk 形如 { agent: { messages: [...] }, tools: { messages: [...] } }
+            const nodeName = Object.keys(chunk)[0];
+            const data = (chunk as Record<string, unknown>)[nodeName] as Record<string, unknown> | undefined;
 
-            // afterAgent
-            for (const hook of hooks.afterAgent) hook(context);
-
-            const lastMsg = messages[messages.length - 1];
-            return { messages, finalOutput: lastMsg?.content ?? "" };
-        },
-
-        async *stream(input: string | Message[], config?: { maxTurns?: number }) {
-            let messages = prepareMessages(input);
-            const maxTurns = config?.maxTurns ?? 10;
-
-            for (const hook of hooks.beforeAgent) hook(context);
-
-            for (let turn = 0; turn < maxTurns; turn++) {
-                for (const hook of hooks.beforeModel) {
-                    messages = hook(messages, context);
-                }
-                const coalesced = coalesceSystemMessages(null, messages);
-                if (coalesced && coalesced.messages) messages = coalesced.messages as Message[];
-
-                const lcMessages = toLangChainMessages(messages);
-                const response = await model.invoke(lcMessages);
-
-                const content = typeof response.content === "string" ? response.content : JSON.stringify(response.content);
-                const toolCalls = extractToolCalls(response);
-                const aiMessage: Message = { type: "ai", content, tool_calls: toolCalls };
-                messages.push(aiMessage);
-                yield { type: "message" as const, content: aiMessage };
-
-                for (const hook of hooks.afterModel) {
-                    const result = hook(messages, context);
-                    if (result?.messages) messages = result.messages as Message[];
-                }
-
-                if (!toolCalls || toolCalls.length === 0) break;
-
-                for (const tc of toolCalls) {
-                    yield { type: "tool_call" as const, content: { type: "tool", content: "", tool_call_id: tc.id, name: tc.name } as Message };
-                    const result = await executeTool(tc);
-                    messages.push(result);
-                    yield { type: "tool_result" as const, content: result };
+            if (data?.messages) {
+                const msgs = data.messages as BaseMessage[];
+                for (const msg of msgs) {
+                    const converted = fromLangChainMessage(msg);
+                    if (converted.type === "ai" && converted.tool_calls?.length) {
+                        yield { type: "tool_call" as const, content: converted };
+                    } else {
+                        yield { type: "message" as const, content: converted };
+                    }
                 }
             }
+        }
 
-            for (const hook of hooks.afterAgent) hook(context);
-        },
-    };
+        // ── afterAgent ──
+        for (const hook of hooks.afterAgent) {
+            hook(context);
+        }
+    }
+
+    return { name, invoke, stream };
 }
